@@ -1,7 +1,5 @@
-from app import create_app, celery
-
-app = create_app()
+from app.celery_app import celery_app
+import app.tasks
 
 if __name__ == '__main__':
-    # This starts the Celery worker
-    celery.start()
+    celery_app.start()

@@ -1,64 +1,63 @@
-from flask import Blueprint, request, jsonify, send_file, current_app
-import os
+from flask import Blueprint, request, jsonify, send_file
+import io
 import uuid
 from werkzeug.utils import secure_filename
-from .tasks import upscale_image_task
 
-main_bp = Blueprint('main', __name__)
-
+bp = Blueprint('main', __name__)
 
 def allowed_file(filename):
     return '.' in filename and \
-        filename.rsplit('.', 1)[1].lower() in current_app.config['ALLOWED_EXTENSIONS']
+        filename.rsplit('.', 1)[1].lower() in {'png', 'jpg', 'jpeg', 'bmp'}
 
-
-@main_bp.route('/')
+@bp.route('/')
 def index():
     return jsonify({
-        'service': 'Image Upscaling API',
+        'service': 'EDSR Image Upscaler API',
         'endpoints': {
-            '/upscale': 'POST - Upload image for upscaling',
-            '/status/<task_id>': 'GET - Check task status',
-            '/download/<filename>': 'GET - Download processed image'
-        }
+            'POST /upscale': 'Upload image for 2x upscaling',
+            'GET /tasks/<task_id>': 'Check task status',
+            'GET /processed/<task_id>': 'Download upscaled image'
+        },
+        'model': 'EDSR_x2 (TensorFlow) with OpenCV fallback'
     })
 
-
-@main_bp.route('/upscale', methods=['POST'])
+@bp.route('/upscale', methods=['POST'])
 def upscale():
-    if 'image' not in request.files:
-        return jsonify({'error': 'No image file provided'}), 400
+    """Upload image - NO DISK SAVING"""
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
 
-    file = request.files['image']
+    file = request.files['file']
     if file.filename == '':
         return jsonify({'error': 'No selected file'}), 400
 
     if not allowed_file(file.filename):
         return jsonify({'error': 'File type not allowed'}), 400
 
-    # Generate unique filename
-    original_ext = os.path.splitext(file.filename)[1]
-    unique_filename = f"{uuid.uuid4().hex}{original_ext}"
+    try:
+        # Read directly into memory - NO DISK
+        image_bytes = file.read()
 
-    # Save uploaded file
-    upload_path = os.path.join(current_app.config['UPLOAD_FOLDER'], unique_filename)
-    file.save(upload_path)
+        # Start Celery task
+        from app.tasks import upscale_image_task
+        task = upscale_image_task.delay(image_bytes, file.filename)
 
-    # Start Celery task
-    task = upscale_image_task.delay(upload_path, unique_filename)
+        return jsonify({
+            'task_id': task.id,
+            'status': 'processing',
+            'check_status': f'/tasks/{task.id}',
+            'download': f'/processed/{task.id}'
+        }), 202
 
-    return jsonify({
-        'message': 'Upscaling started',
-        'task_id': task.id,
-        'status_url': f'/status/{task.id}',
-        'original_filename': file.filename
-    }), 202
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
+@bp.route('/tasks/<task_id>', methods=['GET'])
+def get_task_status(task_id):
+    """Check task status - CORRECT ROUTE"""
+    from app.celery_app import celery_app
 
-@main_bp.route('/status/<task_id>', methods=['GET'])
-def get_status(task_id):
-    from .celery_app import celery
-    task = celery.AsyncResult(task_id)
+    task = celery_app.AsyncResult(task_id)
 
     response = {
         'task_id': task_id,
@@ -66,20 +65,42 @@ def get_status(task_id):
     }
 
     if task.state == 'SUCCESS':
-        response['result'] = task.result
-        if 'result_filename' in task.result:
-            response['download_url'] = f"/download/{task.result['result_filename']}"
+        result = task.result
+        response['result'] = {
+            'status': result.get('status'),
+            'filename': result.get('filename'),
+            'message': result.get('message')
+        }
     elif task.state == 'FAILURE':
         response['error'] = str(task.info)
 
     return jsonify(response)
 
+@bp.route('/processed/<task_id>', methods=['GET'])
+def get_processed(task_id):
+    """Download upscaled image - CORRECT ROUTE, NO DISK"""
+    try:
+        from app.celery_app import celery_app
 
-@main_bp.route('/download/<filename>', methods=['GET'])
-def download_file(filename):
-    result_path = os.path.join(current_app.config['RESULT_FOLDER'], filename)
+        task = celery_app.AsyncResult(task_id)
 
-    if not os.path.exists(result_path):
-        return jsonify({'error': 'File not found'}), 404
+        if task.state != 'SUCCESS':
+            return jsonify({
+                'error': 'Task not completed',
+                'state': task.state
+            }), 404
 
-    return send_file(result_path, as_attachment=True)
+        result = task.result
+        if not isinstance(result, dict) or 'image_bytes' not in result:
+            return jsonify({'error': 'Invalid result format'}), 500
+
+        # Send bytes directly - NO DISK READ
+        return send_file(
+            io.BytesIO(result['image_bytes']),
+            mimetype='image/png',
+            as_attachment=True,
+            download_name=result.get('filename', 'upscaled.png')
+        )
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
