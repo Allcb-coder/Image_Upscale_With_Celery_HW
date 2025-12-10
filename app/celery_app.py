@@ -18,5 +18,5 @@ def make_celery(app_name=__name__):
 
     return celery_app
 
-# Create instance - NO TASKS DEFINED HERE!
+# Create instance
 celery_app = make_celery()

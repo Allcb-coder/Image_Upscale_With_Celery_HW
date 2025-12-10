@@ -60,12 +60,12 @@ class EDSRUpscaler:
             import traceback
             traceback.print_exc()
 
-            # Last resort: create a simple upscaled image
+            # create a simple upscaled image
             img = np.zeros((200, 200, 3), dtype=np.uint8)
             img[50:150, 50:150] = [0, 255, 0]  # Green square
             success, encoded = cv2.imencode('.png', img)
             return encoded.tobytes()
 
-# Create singleton instance - THIS LINE WAS MISSING!
+# Create singleton instance
 upscaler = EDSRUpscaler()
 print(f"✅ EDSRUpscaler singleton created: {upscaler}")
